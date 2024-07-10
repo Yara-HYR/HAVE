@@ -1,0 +1,76 @@
+{
+  "highway": {
+    "__comment__": "high speed",
+    "map": "Town04",
+    "ego_veh": {
+      "type_bak": "vehicle.tesla.model3",
+      "type": "vehicle.audi.a2",
+      "road_id": 45,
+      "lane_id": [
+        -1, -2, -3, -4
+      ],
+      "start_pos": [
+        100,
+        110
+      ],
+      "speed": -80
+    },
+    "same_dir_veh": [
+      {
+        "num": 20,
+        "type": 0,
+        "road_id": 45,
+        "lane_id": [
+          -1, -2, -3, -4
+        ],
+        "start_pos": [
+          114,
+          300
+        ],
+        "speed": [-30, -60],
+        "beam_ratio": 0.5
+      }
+    ],
+    "oppo_dir_veh": [],
+    "special_veh": [],
+    "walker": [],
+    "walker_behavior": {}
+  },
+
+  "narrow": {
+    "__comment__": "a long narrow road with trees surrounded",
+    "map": "Town07",
+    "ego_veh": {
+      "type": "vehicle.tesla.model3",
+      "road_id": 20,
+      "lane_id": [
+        -1
+      ],
+      "start_pos": [
+        0.2,
+        2.2
+      ],
+      "speed": -30
+    },
+    "same_dir_veh": [],
+    "oppo_dir_veh": [
+      {
+        "num": 6,
+        "type": 0,
+        "road_id": 20,
+        "lane_id": [
+          1
+        ],
+        "start_pos": [
+          5,
+          220
+        ],
+        "speed": [-30, -60],
+        "beam_ratio": 0.5
+      }
+    ],
+    "special_veh": [],
+    "walker": [],
+    "walker_behavior": {}
+  }
+}

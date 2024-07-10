@@ -1,0 +1,17 @@
+python run_reconstruction.py \
+  -c pretrained/E2VID_lightweight.pth.tar \
+  -i data/dynamic_6dof.zip \
+  --fixed_duration \
+  --window_duration 33.33 \
+  --auto_hdr \
+  --display \
+  --show_events
+
+python run.py \
+  -c pretrained/E2VID_lightweight.pth.tar \
+  -i data/dynamic_6dof.zip \
+  --fixed_duration \
+  --window_duration 33.33 \
+  --auto_hdr \
+  --display \
+  --show_events

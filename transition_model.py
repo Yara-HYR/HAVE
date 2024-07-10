@@ -11,11 +11,15 @@ import torch.nn as nn
 
 class DeterministicTransitionModel(nn.Module):
 
-    def __init__(self, encoder_feature_dim, action_shape, layer_width):
+    def __init__(self, encoder_feature_dim, action_shape, output_dim=None, layer_width=512, contain_action=True):
         super().__init__()
-        self.fc = nn. Linear(encoder_feature_dim + action_shape[0], layer_width)
+        if contain_action:
+            self.fc = nn.Linear(encoder_feature_dim + action_shape[0], layer_width)
+        else:
+            self.fc = nn.Linear(encoder_feature_dim, layer_width)
+
         self.ln = nn.LayerNorm(layer_width)
-        self.fc_mu = nn.Linear(layer_width, encoder_feature_dim)
+        self.fc_mu = nn.Linear(layer_width, encoder_feature_dim if output_dim is None else output_dim)
         print("Deterministic transition model chosen.")
 
     def forward(self, x):
@@ -94,11 +98,12 @@ class EnsembleOfProbabilisticTransitionModels(object):
 _AVAILABLE_TRANSITION_MODELS = {'': DeterministicTransitionModel,
                                 'deterministic': DeterministicTransitionModel,
                                 'probabilistic': ProbabilisticTransitionModel,
-                                'ensemble': EnsembleOfProbabilisticTransitionModels}
+                                'ensemble': EnsembleOfProbabilisticTransitionModels
+                                }
 
 
-def make_transition_model(transition_model_type, encoder_feature_dim, action_shape, layer_width=512):
+def make_transition_model(transition_model_type, encoder_feature_dim, action_shape, output_dim, layer_width=512, contain_action=True):
     assert transition_model_type in _AVAILABLE_TRANSITION_MODELS
     return _AVAILABLE_TRANSITION_MODELS[transition_model_type](
-        encoder_feature_dim, action_shape, layer_width
+        encoder_feature_dim, action_shape, output_dim, layer_width, contain_action
     )

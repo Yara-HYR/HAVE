@@ -6,236 +6,52 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.init as init
+import torch.nn.functional as F
+
+import numpy as np
+import torchvision
+# from spikingjelly.activation_based import neuron, functional, surrogate, layer
+
+from torch.nn.functional import kl_div
+from torch.autograd import Variable
+
 
 
 def tie_weights(src, trg):
     assert type(src) == type(trg)
-    trg.weight = src.weight
-    trg.bias = src.bias
+    try:
+        trg.weight = src.weight
+        trg.bias = src.bias
+    except:
+        trg = src
 
-class ChannelAttention(nn.Module):
-    """
-    The implementation of channel attention mechanism.
-    """
+def preprocess_obs(rgb_obs, dvs_obs, dvs_obs_shape):
+    # print("raw dvs_obs:", torch.isnan(dvs_obs).all(), dvs_obs.min(), dvs_obs.max())
 
-    def __init__(self, channel, ratio=2):
-        super(ChannelAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # global average pooling
-        self.fc = nn.Sequential(
-            nn.Linear(channel, channel // ratio),
-            nn.ReLU(True),
-            nn.Linear(channel // ratio, channel),
-            nn.Sigmoid()
-        )
+    # RGB
+    rgb_obs = rgb_obs / 255.
 
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return y
+    # DVS
+    if dvs_obs_shape[0] == 5 * 3:
+        nonzero_ev = (dvs_obs != 0)
+        num_nonzeros = nonzero_ev.sum()
+        if num_nonzeros > 0:
+            # compute mean and stddev of the **nonzero** elements of the event tensor
+            # we do not use PyTorch's default mean() and std() functions since it's faster
+            # to compute it by hand than applying those funcs to a masked array
+            mean = dvs_obs.sum() / num_nonzeros
+            stddev = torch.sqrt((dvs_obs ** 2).sum() / num_nonzeros - mean ** 2)
+            mask = nonzero_ev.float()
+            if stddev != 0:
+                dvs_obs = mask * (dvs_obs - mean) / stddev
+        # pass
+    elif dvs_obs_shape[0] == 2 * 3:
+        dvs_obs = dvs_obs / 255.
 
-class SpatialAttention(nn.Module):
-    """
-    The implementation of spatial attention mechanism.
-    """
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
-        padding = 3 if kernel_size == 7 else 1
-        self.conv1 = nn.Conv2d(1, 1, kernel_size, padding=padding, bias=False)
-        self.sigmoid = nn.Sigmoid()
+    # print("after dvs_obs:", torch.isnan(dvs_obs).all(), dvs_obs.min(), dvs_obs.max())
 
-    def forward(self, x):
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = max_out
-        x = self.conv1(x)
-        weight_map = self.sigmoid(x)
-        return weight_map
-
-
-class Attention(nn.Module):
-    """ Position attention module"""
-    # Ref from SAGAN
-
-    def __init__(self, in_dim):
-        super(Attention, self).__init__()
-        self.channel_in = in_dim
-
-        self.query_conv = nn.Conv2d(
-            in_channels=in_dim,
-            out_channels=in_dim // 4,
-            kernel_size=1
-        )
-        self.key_conv = nn.Conv2d(
-            in_channels=in_dim,
-            out_channels=in_dim // 4,
-            kernel_size=1
-        )
-
-        self.key_conv2 = nn.Conv2d(
-            in_channels=in_dim,
-            out_channels=in_dim // 4,
-            kernel_size=1
-        )
-        self.value_conv = nn.Conv2d(
-            in_channels=in_dim,
-            out_channels=in_dim,
-            kernel_size=1
-        )
-
-        self.value_conv2 = nn.Conv2d(
-            in_channels=in_dim,
-            out_channels=in_dim,
-            kernel_size=1
-        )
-
-        self.gamma = nn.Parameter(torch.zeros(1))
-        self.gamma2 = nn.Parameter(torch.zeros(1))
-
-        self.softmax = nn.Softmax(dim=-1)
-        self.softmax2 = nn.Softmax(dim=-1)
-
-    def forward(self, x1,x2,x3,xt):
-        """
-            inputs :
-                x : input feature maps( B X C X H X W)
-            returns :
-                out : attention value + input feature
-                attention: B X (HxW) X (HxW)
-        """
-        m_batchsize, C, height, width = x1.size()
-        proj_query = self\
-            .query_conv(x3)\
-            .view(m_batchsize, -1, width * height)\
-            .permute(0, 2, 1)
-        proj_key = self\
-            .key_conv(x1)\
-            .view(m_batchsize, -1, width * height)
-        energy = torch.bmm(proj_query, proj_key)
-        attention = self.softmax(energy)
-
-
-
-
-
-
-
-        proj_query2 = self\
-            .query_conv(x3)\
-            .view(m_batchsize, -1, width * height)\
-            .permute(0, 2, 1)
-        proj_key2 = self\
-            .key_conv2(x2)\
-            .view(m_batchsize, -1, width * height)
-        energy2 = torch.bmm(proj_query2, proj_key2)
-        attention2 = self.softmax2(energy2)
-
-        proj_value = self\
-            .value_conv(x3)\
-            .view(m_batchsize, -1, width * height)
-
-        attention = self.softmax(attention+attention2)
-
-        out = torch.bmm(
-            proj_value,
-            attention.permute(0, 2, 1)
-        )
-        attention_mask = out.view(m_batchsize, C, height, width)
-
-  
-        proj_value_t = self\
-            .value_conv2(xt)\
-            .view(m_batchsize, -1, width * height)
-
-        out2 = torch.bmm(
-            proj_value_t,
-            attention.permute(0, 2, 1)
-        )
-        attention_mask2 = out2.view(m_batchsize, C, height, width)
-
-        out = self.gamma * attention_mask + x3
-        out2 = self.gamma2 * attention_mask2 + xt
-        return attention,out,out2
-
-
-
-
-
-
-
-
-class SelfAttention(nn.Module):
-    """ Position attention module"""
-    # Ref from SAGAN
-
-    def __init__(self, in_dim):
-        super(SelfAttention, self).__init__()
-        self.channel_in = in_dim
-
-        self.query_conv = nn.Conv2d(
-            in_channels=in_dim,
-            out_channels=in_dim // 4,
-            kernel_size=1
-        )
-        self.key_conv = nn.Conv2d(
-            in_channels=in_dim,
-            out_channels=in_dim // 4,
-            kernel_size=1
-        )
-
-        self.value_conv = nn.Conv2d(
-            in_channels=in_dim,
-            out_channels=in_dim,
-            kernel_size=1
-        )
-
-
-
-        self.gamma = nn.Parameter(torch.zeros(1))
-
-        self.softmax = nn.Softmax(dim=-1)
-
-
-
-    def forward(self, xi):
-        """
-            inputs :
-                x : input feature maps( B X C X H X W)
-            returns :
-                out : attention value + input feature
-                attention: B X (HxW) X (HxW)
-        """
-        m_batchsize, C, height, width = xi.size()
-        proj_query = self\
-            .query_conv(xi)\
-            .view(m_batchsize, -1, width * height)\
-            .permute(0, 2, 1)
-        proj_key = self\
-            .key_conv(xi)\
-            .view(m_batchsize, -1, width * height)
-        energy = torch.bmm(proj_query, proj_key)
-        attention = self.softmax(energy)
-
-
-
-        proj_value = self\
-            .value_conv(xi)\
-            .view(m_batchsize, -1, width * height)
-
-        # attention = attention+attention2
-
-        out = torch.bmm(
-            proj_value,
-            attention.permute(0, 2, 1)
-        )
-        attention_mask = out.view(m_batchsize, C, height, width)
-
-        attention = self.gamma * attention_mask + xi
-
-
-        return attention
-
-
+    return rgb_obs, dvs_obs
 
 
 class PixelEncoder(nn.Module):
@@ -247,6 +63,7 @@ class PixelEncoder(nn.Module):
 
         self.feature_dim = feature_dim
         self.num_layers = num_layers
+        self.obs_shape = obs_shape
 
         self.convs = nn.ModuleList(
             [nn.Conv2d(obs_shape[0], num_filters, 3, stride=2)]
@@ -254,7 +71,7 @@ class PixelEncoder(nn.Module):
         for i in range(num_layers - 1):
             self.convs.append(nn.Conv2d(num_filters, num_filters, 3, stride=1))
 
-        out_dim = {2: 39, 4: 35, 6: 31}[num_layers]
+        out_dim = 6
         self.fc = nn.Linear(num_filters * out_dim * out_dim, self.feature_dim)
         self.ln = nn.LayerNorm(self.feature_dim)
 
@@ -266,7 +83,26 @@ class PixelEncoder(nn.Module):
         return mu + eps * std
 
     def forward_conv(self, obs):
-        obs = obs / 255.
+
+        if self.obs_shape[0] != 5:
+            # ↓↓↓ RGB，DVS-frame，E2VID preprocess
+            obs = obs / 255.
+            # ↑↑↑
+
+        else:
+            # ↓↓↓ DVS-Voxel-grid preprocess！！！
+            nonzero_ev = (obs != 0)
+            num_nonzeros = nonzero_ev.sum()
+            if num_nonzeros > 0:
+                # compute mean and stddev of the **nonzero** elements of the event tensor
+                # we do not use PyTorch's default mean() and std() functions since it's faster
+                # to compute it by hand than applying those funcs to a masked array
+                mean = obs.sum() / num_nonzeros
+                stddev = torch.sqrt((obs ** 2).sum() / num_nonzeros - mean ** 2)
+                mask = nonzero_ev.float()
+                obs = mask * (obs - mean) / stddev
+            # ↑↑↑
+
         self.outputs['obs'] = obs
 
         conv = torch.relu(self.convs[0](obs))
@@ -276,71 +112,14 @@ class PixelEncoder(nn.Module):
             conv = torch.relu(self.convs[i](conv))
             self.outputs['conv%s' % (i + 1)] = conv
 
-        # h = conv.view(conv.size(0), -1)
-        return conv
+        h = conv.view(conv.size(0), -1)
+        return h
 
-
-
-    def forward_conv1(self, obs):
-        obs = obs / 255.
-        self.outputs['obs'] = obs
-
-        conv = torch.relu(self.convs1[0](obs))
-        self.outputs1['conv1'] = conv
-
-        for i in range(1, self.num_layers):
-            conv = torch.relu(self.convs1[i](conv))
-            self.outputs1['conv%s' % (i + 1)] = conv
-
-        # h = conv.view(conv.size(0), -1)
-        return conv
-
-
-
-
-
-    def forward(self, obs, detach=False,fusion=True):
-        diff  = torch.cat([obs[:,6:9,:,:]-obs[:,3:6,:,:],obs[:,3:6,:,:]-obs[:,0:3,:,:]],dim=1)
-        h = self.forward_conv(diff)
-        h1 = self.forward_conv1(obs[:,3:6,:,:])
-
-        h0 = self.forward_conv1(obs[:,0:3,:,:])
-        h2 = self.forward_conv1(obs[:,6:9,:,:])#
-        # import pdb
-        # pdb.set_trace()
-
-        # h1 = self.selfatt_image(h1)
-        # h = self.selfatt_video(h)
-
-        s_att, h1,h = self.att_qkv(h0,h2,h1,h)
-        # # h = s_att*h + h
-
-
-
-
-        # h = self.crossatt_qkvv(h,h1) + self.selfatt_qkvv(h,h)
-        # h1 = self.crossatt_qkvi(h1,h) + self.selfatt_qkvi(h1,h1)
-        
-
-
-        # i_attention = self.spatial_attention(h1)
-        # # i_attention2 =self.channel_attention(h1)
-
-        # v_attention = self.temporal_attention(h)
-        # # v_attention2 =self.channel_attention2(h)
-
-        # h = h*i_attention + h* v_attention + h*i_attention2 +h*v_attention2+h
-        # h1 = h1*v_attention + h1*i_attention + h1*i_attention2 + h1*v_attention2+h1
-
-        # h = h*i_attention + h* v_attention + h
-        # h1 = h1*v_attention + h1*i_attention + h1
-
-        h = h.view(h.size(0), -1)
-        h1 = h1.view(h1.size(0), -1)
+    def forward(self, obs, detach=False):
+        h = self.forward_conv(obs)
 
         if detach:
             h = h.detach()
-            h1 = h1.detach()
 
         h_fc = self.fc(h)
         self.outputs['fc'] = h_fc
@@ -348,189 +127,13 @@ class PixelEncoder(nn.Module):
         out = self.ln(h_fc)
         self.outputs['ln'] = out
 
-
-
-        h_fc1 = self.fc1(h1)
-        self.outputs1['fc'] = h_fc1
-
-        out1 = self.ln(h_fc1)
-        self.outputs1['ln'] = out1
-
-        # fusion_out = torch.cat([out,out1],dim=1)
-
-
-        fusion_out = self.blp(h_fc,h_fc1)
-        fusion_out = self.ln_a(fusion_out)
-
-        if fusion==True:
-            return fusion_out
-        else:
-            return fusion_out, out, out1
-
-    # def forward(self, obs, detach=False,fusion=True):
-    #     h = self.forward_conv(obs)
-    #     h1 = self.forward_conv1(obs[:,3:6,:,:])
-
-    #     h0 = self.forward_conv1(obs[:,0:3,:,:])
-    #     h2 = self.forward_conv1(obs[:,6:9,:,:])#
-    #     # import pdb
-    #     # pdb.set_trace()
-
-    #     # s_att, h1,h = self.att_qkv(h0,h2,h1,h)
-
-
-    #     h = self.crossatt_qkvv(h,h1) + self.selfatt_qkvv(h,h)
-    #     h1 = self.crossatt_qkvi(h1,h) + self.selfatt_qkvi(h1,h1)
-    #     # h = s_att*h + h
-
-
-    #     # i_attention = self.spatial_attention(h1)
-    #     # # i_attention2 =self.channel_attention(h1)
-
-    #     # v_attention = self.temporal_attention(h)
-    #     # # v_attention2 =self.channel_attention2(h)
-
-    #     # h = h*i_attention + h* v_attention + h*i_attention2 +h*v_attention2+h
-    #     # h1 = h1*v_attention + h1*i_attention + h1*i_attention2 + h1*v_attention2+h1
-
-    #     # h = h*i_attention + h* v_attention + h
-    #     # h1 = h1*v_attention + h1*i_attention + h1
-
-    #     h = h.view(h.size(0), -1)
-    #     h1 = h1.view(h1.size(0), -1)
-
-    #     if detach:
-    #         h = h.detach()
-    #         h1 = h1.detach()
-
-    #     h_fc = self.fc(h)
-    #     self.outputs['fc'] = h_fc
-
-    #     out = self.ln(h_fc)
-    #     self.outputs['ln'] = out
-
-
-
-    #     h_fc1 = self.fc1(h1)
-    #     self.outputs1['fc'] = h_fc1
-
-    #     out1 = self.ln(h_fc1)
-    #     self.outputs1['ln'] = out1
-
-    #     fusion_out = torch.cat([out,out1],dim=1)
-    #     if fusion==True:
-    #         return fusion_out
-    #     else:
-    #         return fusion_out, out, out1
-
-
-    # def forward_conv(self, obs):
-    #     obs = obs / 255.
-    #     self.outputs['obs'] = obs
-
-    #     convs_list = []
-
-    #     conv = torch.relu(self.convs[0](obs))
-    #     self.outputs['conv1'] = conv
-    #     convs_list.append(conv)
-
-    #     for i in range(1, self.num_layers):
-    #         conv = torch.relu(self.convs[i](conv))
-    #         self.outputs['conv%s' % (i + 1)] = conv
-    #         convs_list.append(conv)
-
-    #     # h = conv.view(conv.size(0), -1)
-    #     return convs_list[0],convs_list[1],convs_list[2],convs_list[3]
-    #     # return conv
-
-
-
-    # def forward_conv1(self, obs):
-    #     obs = obs / 255.
-    #     self.outputs['obs'] = obs
-
-    #     convs_list = []
-
-    #     conv = torch.relu(self.convs1[0](obs))
-    #     self.outputs1['conv1'] = conv
-
-    #     convs_list.append(conv)
-
-    #     for i in range(1, self.num_layers):
-    #         conv = torch.relu(self.convs1[i](conv))
-    #         self.outputs1['conv%s' % (i + 1)] = conv
-    #         convs_list.append(conv)
-
-
-    #     # h = conv.view(conv.size(0), -1)
-    #     return convs_list[0],convs_list[1],convs_list[2],convs_list[3]
-    #     # return conv
-
-
-    # def forward(self, obs, detach=False,fusion=True):
-    #     h = self.forward_conv(obs)
-    #     h1 = self.forward_conv1(obs[:,3:6,:,:])
-    #     i_attention_list = []
-    #     v_attention_list = []
-
-
-    #     i_attention = self.spatial_attention(h1[0])
-    #     i_attention_list.append(i_attention)
-
-    #     v_attention = self.temporal_attention(h[0])
-    #     v_attention_list.append(v_attention)
-
-    #     out_list=[]
-    #     out1_list = []
-    #     fusion_out_list = []
-
-    #     for i in range(4):
-    #         h[i] = h[i]*i_attention[i] + h[i]* v_attention[i] + h[i]
-    #         h1[i] = h1[i]*v_attention[i] + h1[i]*i_attention[i] + h1[i]            
-
-
-
-    #         # h = h*i_attention + h* v_attention + h
-    #         # h1 = h1*v_attention + h1*i_attention + h1
-
-    #         if detach:
-    #             h[i] = h[i].detach()
-    #             h1[i] = h1[i].detach()
-
-    #         fc_i = getattr(self, 'vfc'+str(i))
-    #         h_fc = fc_i(h[i])
-    #         self.outputs['fc'+str(i)] = h_fc
-
-    #         out = self.ln(h_fc)
-    #         self.outputs['ln'] = out
-
-
-
-    #         fc_i = getattr(self, 'vfc'+str(i))
-    #         h_fc1 = fc_i(h[i])
-    #         self.outputs['fc'+str(i)] = h_fc1
-
-    #         out1 = self.ln(h_fc1)
-    #         self.outputs1['ln'] = out1
-
-    #         fusion_out = torch.cat([out,out1],dim=1)
-    #         fusion_out_list.apend(fusion_out)
-    #         out_list.apend(out)
-    #         out1_list.append(out1)
-
-    #     # out = torch.stack(out_list,dim=1)
-    #     if fusion==True:
-    #         return fusion_out
-    #     else:
-    #         return fusion_out, out, out1
-
+        return out, None
 
     def copy_conv_weights_from(self, source):
         """Tie convolutional layers"""
         # only tie conv layers
         for i in range(self.num_layers):
             tie_weights(src=source.convs[i], trg=self.convs[i])
-            tie_weights(src=source.convs1[i], trg=self.convs1[i])
 
     def log(self, L, step, log_freq):
         if step % log_freq != 0:
@@ -553,74 +156,33 @@ class PixelEncoderCarla096(PixelEncoder):
         super(PixelEncoder, self).__init__()
 
         assert len(obs_shape) == 3
-        print(obs_shape)
 
         self.feature_dim = feature_dim
         self.num_layers = num_layers
 
         self.convs = nn.ModuleList(
-            [nn.Conv2d(obs_shape[0]-3, num_filters, 3, stride=2)]
+            [nn.Conv2d(obs_shape[0], num_filters, 3, stride=2)]
         )
         for i in range(num_layers - 1):
             self.convs.append(nn.Conv2d(num_filters, num_filters, 3, stride=stride))
 
-        self.convs1 = nn.ModuleList(
-            [nn.Conv2d(int(obs_shape[0]/3), num_filters, 3, stride=2)]
-        )
-        for i in range(num_layers - 1):
-            self.convs1.append(nn.Conv2d(num_filters, num_filters, 3, stride=stride))
-
-
-        out_dims = 56  # if defaults change, adjust this as needed
+        out_dims = 4*4  # if defaults change, adjust this as needed
         self.fc = nn.Linear(num_filters * out_dims, self.feature_dim)
         self.ln = nn.LayerNorm(self.feature_dim)
 
-        self.fc1 = nn.Linear(num_filters * out_dims, self.feature_dim)
-        self.ln1 = nn.LayerNorm(self.feature_dim)
-
-
-        self.fc_a = nn.Linear(num_filters * out_dims, self.feature_dim)
-        self.ln_a = nn.LayerNorm(self.feature_dim*2)
-
-        self.att_qkv = Attention(num_filters)
-
-        # self.crossatt_qkvv  = Attention(num_filters)
-        # self.crossatt_qkvi  = Attention(num_filters)
-        # self.selfatt_qkvv  = Attention(num_filters)
-        # self.selfatt_qkvi  = Attention(num_filters)
-
-        # out_dims = [11,11,11,56]
-
-        # for i in range(4):
-        #         name = 'vfc' + str(i)
-        #         setattr(self, name, nn.Linear(num_filters * out_dims[i], self.feature_dim))
-
-        #         name = 'ifc' + str(i)
-        #         setattr(self, name, nn.Linear(num_filters * out_dims[i], self.feature_dim))
-
         self.outputs = dict()
-        self.outputs1 = dict()
 
-
-        # self.spatial_attention = SpatialAttention()
-        # self.temporal_attention = SpatialAttention()
-        # self.channel_attention = ChannelAttention(num_filters)
-        # self.channel_attention2 = ChannelAttention(num_filters)
-
-        self.blp = torch.nn.Bilinear(50,50,100)
-
-        self.selfatt_video = SelfAttention(num_filters)
-        self.selfatt_image = SelfAttention(num_filters)
 
 class PixelEncoderCarla098(PixelEncoder):
     """Convolutional encoder of pixels observations."""
-    def __init__(self, obs_shape, feature_dim, num_layers=2, num_filters=32, stride=1):
+    def __init__(self, obs_shape, feature_dim, num_layers=4, num_filters=32, stride=1):
         super(PixelEncoder, self).__init__()
 
         assert len(obs_shape) == 3
 
         self.feature_dim = feature_dim
         self.num_layers = num_layers
+        self.obs_shape = obs_shape
 
         self.convs = nn.ModuleList()
         self.convs.append(nn.Conv2d(obs_shape[0], 64, 5, stride=2))
@@ -628,35 +190,138 @@ class PixelEncoderCarla098(PixelEncoder):
         self.convs.append(nn.Conv2d(128, 256, 3, stride=2))
         self.convs.append(nn.Conv2d(256, 256, 3, stride=2))
 
-        out_dims = 56  # 3 cameras
-        # out_dims = 100  # 5 cameras
+        out_dims = 6*6  # 1 cameras, input: 128*128
+        # out_dims = 14*14  # 1 cameras, input: 256*256
+
         self.fc = nn.Linear(256 * out_dims, self.feature_dim)
         self.ln = nn.LayerNorm(self.feature_dim)
 
         self.outputs = dict()
 
 
-class IdentityEncoder(nn.Module):
-    def __init__(self, obs_shape, feature_dim, num_layers, num_filters):
+
+class pixelCat(nn.Module):
+    """Convolutional encoder of pixels observations."""
+
+    def __init__(self, obs_shape, feature_dim, num_layers=2, num_filters=32, stride=1):
         super().__init__()
 
-        assert len(obs_shape) == 1
-        self.feature_dim = obs_shape[0]
+        assert len(obs_shape) == 2
+
+        rgb_obs_shape, dvs_obs_shape = obs_shape[0], obs_shape[1]
+
+        self.rgb_obs_shape = rgb_obs_shape
+        self.dvs_obs_shape = dvs_obs_shape
+
+        self.feature_dim = feature_dim
+        self.num_layers = num_layers
+        out_dims = 36  # 3 cameras
+
+        self.rgb_head_convs = nn.ModuleList()
+        self.rgb_head_convs.append(nn.Conv2d(3 * 3, 64, 5, stride=2))
+        self.rgb_head_convs.append(nn.Conv2d(64, 128, 3, stride=2))
+        self.rgb_head_convs.append(nn.Conv2d(128, 256, 3, stride=2))
+        self.rgb_head_convs.append(nn.Conv2d(256, 256, 3, stride=2))
+        self.rgb_fc = nn.Linear(256 * out_dims, self.feature_dim)
+        self.rgb_ln = nn.LayerNorm(self.feature_dim)
+
+        self.dvs_head_convs = nn.ModuleList()
+        self.dvs_head_convs.append(nn.Conv2d(5 * 3, 64, 5, stride=2))
+        self.dvs_head_convs.append(nn.Conv2d(64, 128, 3, stride=2))
+        self.dvs_head_convs.append(nn.Conv2d(128, 256, 3, stride=2))
+        self.dvs_head_convs.append(nn.Conv2d(256, 256, 3, stride=2))
+        self.dvs_fc = nn.Linear(256 * out_dims, self.feature_dim)
+        self.dvs_ln = nn.LayerNorm(self.feature_dim)
+
+        # out_dims = 16  # 1 cameras
+
+        self.last_fusion_fc = nn.Linear(self.feature_dim * 2, self.feature_dim)
+        self.last_fusion_ln = nn.LayerNorm(self.feature_dim)
+        self.outputs = dict()
+
+    def reparameterize(self, mu, logstd):
+        std = torch.exp(logstd)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+
+    def forward_conv(self, obs):
+        rgb_obs, dvs_obs = obs
+        # print("rgb_obs:", rgb_obs.min(), rgb_obs.max())
+        # print("dvs_obs:", dvs_obs.min(), dvs_obs.max())
+
+        # Obs Preprocess ↓
+        # RGB的预处理：
+        rgb_obs, dvs_obs = preprocess_obs(rgb_obs, dvs_obs, self.dvs_obs_shape)
+        # ↑↑↑
+        # print("ffffrgb_obs:", rgb_obs.min(), rgb_obs.max())
+        # print("ffffdvs_obs:", dvs_obs.min(), dvs_obs.max())
+
+        # print(torch.min(rgb_obs), torch.max(rgb_obs), torch.min(dvs_obs), torch.max(dvs_obs))
+        rgb_conv = torch.relu(self.rgb_head_convs[0](rgb_obs))
+        rgb_conv = torch.relu(self.rgb_head_convs[1](rgb_conv))
+        rgb_conv = torch.relu(self.rgb_head_convs[2](rgb_conv))
+        rgb_conv = torch.relu(self.rgb_head_convs[3](rgb_conv))
+
+        dvs_conv = torch.relu(self.dvs_head_convs[0](dvs_obs))
+        dvs_conv = torch.relu(self.dvs_head_convs[1](dvs_conv))
+        dvs_conv = torch.relu(self.dvs_head_convs[2](dvs_conv))
+        dvs_conv = torch.relu(self.dvs_head_convs[3](dvs_conv))
+
+        return rgb_conv, dvs_conv
+
 
     def forward(self, obs, detach=False):
-        return obs
+        rgb_conv, dvs_conv = self.forward_conv(obs)
+
+        if detach:
+            rgb_conv = rgb_conv.detach()
+            dvs_conv = dvs_conv.detach()
+
+        rgb_h = rgb_conv.view(rgb_conv.size(0), -1)
+        rgb_h = self.rgb_ln(self.rgb_fc(rgb_h))
+
+        dvs_h = dvs_conv.view(dvs_conv.size(0), -1)
+        dvs_h = self.dvs_ln(self.dvs_fc(dvs_h))
+
+        return torch.cat([rgb_h, dvs_h], dim=1), [rgb_h, dvs_h]
 
     def copy_conv_weights_from(self, source):
-        pass
+        """Tie convolutional layers"""
+        # only tie conv layers
+        for i in range(4):
+            tie_weights(src=source.rgb_head_convs[i], trg=self.rgb_head_convs[i])
+            tie_weights(src=source.dvs_head_convs[i], trg=self.dvs_head_convs[i])
 
     def log(self, L, step, log_freq):
-        pass
+        if step % log_freq != 0:
+            return
+
+        for k, v in self.outputs.items():
+            # L.log_histogram('train_encoder/%s_hist' % k, v, step)
+            if len(v.shape) > 2:
+                L.log_image('train_encoder/%s_img' % k, v[0], step)
+        #
+        # for i in range(self.num_layers):
+        #     L.log_param('train_encoder/rgb_conv%s' % (i + 1), self.rgb_convs[i], step)
+        #     L.log_param('train_encoder/dvs_conv%s' % (i + 1), self.dvs_convs[i], step)
+        # L.log_param('train_encoder/fc', self.fc, step)
+        # L.log_param('train_encoder/ln', self.ln, step)
+
+
+
+
+
+
+
+
 
 
 _AVAILABLE_ENCODERS = {'pixel': PixelEncoder,
                        'pixelCarla096': PixelEncoderCarla096,
                        'pixelCarla098': PixelEncoderCarla098,
-                       'identity': IdentityEncoder}
+                       'pixelCat': pixelCat,
+                       }
 
 
 def make_encoder(
